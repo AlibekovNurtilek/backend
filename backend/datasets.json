@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "name": "Узак жол",
+    "txt_path": "../../uzak_jol.txt",
+    "wav_path": "uzak_jol_wavs",
+    "total_duration_seconds": 12030.3099375
+  },
+  {
+    "id": 2,
+    "name": "Эркек",
+    "txt_path": "../../m_wavs.txt",
+    "wav_path": "m_wavs",
+    "total_duration_seconds": 102343
+  },
+  {
+    "id": 3,
+    "name": "Аял",
+    "txt_path": "../../f_wavs.txt",
+    "wav_path": "f_wavs",
+    "total_duration_seconds": 97860
+  },
+  {
+    "id": 4,
+    "name": "Сынган кылыч",
+    "txt_path": "../../syngan_kylych.txt",
+    "wav_path": "syngan_kylych_wavs",
+    "total_duration_seconds": 83672
+  }
+]
