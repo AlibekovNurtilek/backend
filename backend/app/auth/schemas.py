@@ -1,4 +1,5 @@
 from pydantic import BaseModel, constr
+from app.auth.models import UserRole
 
 # 🔐 Базовые схемы
 class UserBase(BaseModel):
@@ -6,6 +7,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: constr(min_length=4)
+    role: UserRole = UserRole.VIEWER
 
 class UserLogin(BaseModel):
     username: str

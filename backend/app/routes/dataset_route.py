@@ -18,6 +18,8 @@ from app.schemas.dataset import (
 )
 from app.tasks.initialize_dataset_tasks import initialize_dataset_task
 from app.services.initialize_service import create_dataset_entry
+import logging
+logger = logging.getLogger(__name__)
 
 
 
@@ -64,9 +66,6 @@ def get_all_datasets(
 def get_dataset_by_id(dataset_id: int, db: Session = Depends(get_db)):
     return dataset_service.get_dataset_by_id(dataset_id, db)
 
-@router.post("/", response_model=DatasetOut, status_code=status.HTTP_201_CREATED)
-def create_dataset(dataset: DatasetCreate, db: Session = Depends(get_db)):
-    return dataset_service.create_dataset(dataset, db)
 
 @router.put("/{dataset_id}", response_model=DatasetOut)
 def update_dataset(dataset_id: int, dataset: DatasetUpdate, db: Session = Depends(get_db)):
@@ -77,8 +76,19 @@ def delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
     dataset_service.delete_dataset(dataset_id, db)
     return
 
+
 @router.post("/initialize")
 def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get_db)):
+    # Шаг 0: проверяем наличие такого же URL в базе
+    existing_dataset = db.query(AudioDataset).filter(AudioDataset.url == data.url).first()
+    if existing_dataset:
+        logger.info(f"Датасет с таким URL уже существует: ID={existing_dataset.id}, name={existing_dataset.name}")
+        return {
+            "message": "Видео уже загружено",
+            "dataset_id": existing_dataset.id,
+            "status": existing_dataset.status,
+        }
+
     # Шаг 1: создаём запись в БД со статусом INITIALIZING
     dataset_id = create_dataset_entry(db, data.url)
 
@@ -90,3 +100,4 @@ def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get_db)):
         "task_id": task.id,
         "dataset_id": dataset_id
     }
+

@@ -15,7 +15,7 @@ def register_user(user: schemas.UserCreate, db: Session) -> schemas.UserOut:
     new_user = models.User(
         username=user.username,
         hashed_password=hashed_pw,
-        role='administrator'
+        role=user.role
     )
     db.add(new_user)
     db.commit()

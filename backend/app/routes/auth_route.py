@@ -5,6 +5,8 @@ from app.auth import models, schemas, utils
 from datetime import timedelta
 from fastapi.responses import JSONResponse
 from fastapi import Request
+from app.auth.utils import admin_required
+
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -17,6 +19,7 @@ def get_db():
         db.close()
 
 
+
 @router.post("/register", response_model=schemas.UserOut)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     existing_user = db.query(models.User).filter(models.User.username == user.username).first()
@@ -27,7 +30,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     new_user = models.User(
         username=user.username,
         hashed_password=hashed_pw,
-        role='administrator'
+        role=user.role
     )
     db.add(new_user)
     db.commit()
@@ -36,7 +39,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
+def login(credentials: schemas.UserLogin, db: Session = Depends(get_db), admin = Depends(admin_required)):
     user = db.query(models.User).filter(models.User.username == credentials.username).first()
     if not user or not utils.verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -82,3 +85,7 @@ def logout():
     response = JSONResponse({"message": "Logged out"})
     response.delete_cookie("access_token")
     return response
+
+@router.get("/admin-only")
+def admin_dashboard(current_user: dict = Depends(admin_required)):
+    return {"message": f"Welcome, {current_user['username']}! You are an admin."}

@@ -1,9 +1,10 @@
 from passlib.context import CryptContext
+from fastapi import Request, HTTPException, Depends, status
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Optional
 from app.auth.schemas import Token
-from app.auth.models import User
+from app.auth.models import User, UserRole
 from app.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -32,3 +33,23 @@ def decode_access_token(token: str):
         return {"username": username, "role": role}
     except JWTError:
         return None
+
+def get_current_user(request: Request):
+
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated: access_token cookie missing")
+    
+    payload = decode_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    return payload
+
+def admin_required(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this resource"
+        )
+    return current_user

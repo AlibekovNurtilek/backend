@@ -9,7 +9,6 @@ class DatasetBase(BaseModel):
     count_of_samples: int
     duration: float | None = None
     status: str
-    dataset_img :str | None = None
 
 class DatasetCreate(DatasetBase):
     pass
