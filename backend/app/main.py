@@ -5,7 +5,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.db import Base, engine
 from app.auth import models  # обязательно, чтобы модель подгрузилась
-from app.models import datasets, samples
 from app.routes.ws_router import redis_listener
 
 # создаёт таблицы, если их нет
