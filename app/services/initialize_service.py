@@ -155,8 +155,8 @@ def initialize_dataset_service(dataset_id: int, data: DatasetInitRequest, db: Se
             result = segment_audio(
                 str(source_abs_path), 
                 str(segments_abs_dir), 
-                data.min_length, 
-                data.max_length, 
+                data.min_duration, 
+                data.max_duration, 
                 dataset_id=dataset.id
             )
 

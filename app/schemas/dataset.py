@@ -26,8 +26,8 @@ class DatasetOut(DatasetBase):
 
 class DatasetInitRequest(BaseModel):
     url: str
-    min_length: int | None = None
-    max_length: int | None = None
+    min_duration: int | None = None
+    max_duration: int | None = None
 
 from typing import List
 

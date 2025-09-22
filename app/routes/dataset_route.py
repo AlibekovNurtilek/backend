@@ -80,14 +80,14 @@ def delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
 @router.post("/initialize")
 def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get_db)):
     # Шаг 0: проверяем наличие такого же URL в базе
-    existing_dataset = db.query(AudioDataset).filter(AudioDataset.url == data.url).first()
-    if existing_dataset:
-        logger.info(f"Датасет с таким URL уже существует: ID={existing_dataset.id}, name={existing_dataset.name}")
-        return {
-            "message": "Видео уже загружено",
-            "dataset_id": existing_dataset.id,
-            "status": existing_dataset.status,
-        }
+    # existing_dataset = db.query(AudioDataset).filter(AudioDataset.url == data.url).first()
+    # if existing_dataset:
+    #     logger.info(f"Датасет с таким URL уже существует: ID={existing_dataset.id}, name={existing_dataset.name}")
+    #     return {
+    #         "message": "Видео уже загружено",
+    #         "dataset_id": existing_dataset.id,
+    #         "status": existing_dataset.status,
+    #     }
 
     # Шаг 1: создаём запись в БД со статусом INITIALIZING
     dataset_id = create_dataset_entry(db, data.url)

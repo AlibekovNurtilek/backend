@@ -21,7 +21,7 @@ def get_db():
 
 
 @router.post("/register", response_model=schemas.UserOut)
-def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def register(user: schemas.UserCreate, db: Session = Depends(get_db), admin = Depends(admin_required)):
     existing_user = db.query(models.User).filter(models.User.username == user.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already taken")
@@ -39,7 +39,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def login(credentials: schemas.UserLogin, db: Session = Depends(get_db), admin = Depends(admin_required)):
+def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == credentials.username).first()
     if not user or not utils.verify_password(credentials.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -86,6 +86,3 @@ def logout():
     response.delete_cookie("access_token")
     return response
 
-@router.get("/admin-only")
-def admin_dashboard(current_user: dict = Depends(admin_required)):
-    return {"message": f"Welcome, {current_user['username']}! You are an admin."}

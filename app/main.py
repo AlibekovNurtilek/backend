@@ -23,7 +23,7 @@ async def startup():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8082",
+        "http://localhost:8080",
         "http://80.72.180.130:8082",
     ],
     allow_credentials=True,
