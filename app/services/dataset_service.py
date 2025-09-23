@@ -11,8 +11,8 @@ from datetime import datetime
 
 def get_all_datasets(
     db: Session,
-    limit: int = 50,
-    offset: int = 0,
+    page: int = 1,
+    limit: int = 10,
     status: Optional[str] = None,
     name_search: Optional[str] = None,
     created_from: Optional[datetime] = None,
@@ -32,10 +32,11 @@ def get_all_datasets(
     if created_to:
         query = query.filter(AudioDataset.created_at <= created_to)
 
+    offset = (page - 1) * limit
     total = query.count()
     items = query.order_by(AudioDataset.created_at.desc()).offset(offset).limit(limit).all()
 
-    return {"items": items, "total": total}
+    return {"items": items, "total": total, "page": page, "limit": limit}
 
 
 

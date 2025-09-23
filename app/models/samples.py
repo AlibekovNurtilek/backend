@@ -1,5 +1,3 @@
-# app/models/sample_text.py
-
 from sqlalchemy import (
     Column,
     Integer,
@@ -14,6 +12,7 @@ from datetime import datetime
 from app.db import Base
 from sqlalchemy import Enum as SqlEnum
 from app.models.data_status import SampleStatus
+from enum import Enum
 
 class SampleText(Base):
     __tablename__ = "samples"
@@ -29,3 +28,25 @@ class SampleText(Base):
 
     # relationships
     dataset = relationship("AudioDataset", back_populates="samples", passive_deletes=True)
+    actions = relationship("SampleAction", back_populates="sample", cascade="all, delete-orphan")
+
+
+class ActionType(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+    EDIT = "edit"
+
+
+class SampleAction(Base):
+    __tablename__ = "sample_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sample_id = Column(Integer, ForeignKey("samples.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    
+    action = Column(SqlEnum(ActionType), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    # relationships
+    user = relationship("User")
+    sample = relationship("SampleText", back_populates="actions")

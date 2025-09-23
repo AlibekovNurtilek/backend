@@ -7,6 +7,7 @@ from app.schemas.sample import (
 )
 from app.services import sample_service
 from app.models.data_status import SampleStatus
+from app.auth.utils import get_current_user
 
 router = APIRouter(prefix="/samples", tags=["samples"])
 
@@ -20,12 +21,12 @@ def get_db():
 
 
 @router.get("/", response_model=List[SampleOut])
-def get_all_samples(db: Session = Depends(get_db)):
+def get_all_samples(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return sample_service.get_all_samples(db)
 
 
 @router.get("/{sample_id}", response_model=SampleOut)
-def get_sample_by_id(sample_id: int, db: Session = Depends(get_db)):
+def get_sample_by_id(sample_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return sample_service.get_sample_by_id(sample_id, db)
 
 @router.get("/by-dataset/{dataset_id}", response_model=DatasetSamplesResponse)
@@ -37,7 +38,7 @@ def get_samples_by_dataset_id(
     search: str | None = Query(None, description="Поиск по filename или text"),
     from_index: int | None = Query(None, ge=0, description="Начальный индекс в отсортированном списке по filename"),
     to_index: int | None = Query(None, ge=0, description="Конечный индекс в отсортированном списке по filename"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db), current_user=Depends(get_current_user)
 ):
     return sample_service.get_samples_by_dataset_id(
         dataset_id=dataset_id,
@@ -52,24 +53,24 @@ def get_samples_by_dataset_id(
 
 
 @router.post("/", response_model=SampleOut, status_code=status.HTTP_201_CREATED)
-def create_sample(sample: SampleCreate, db: Session = Depends(get_db)):
+def create_sample(sample: SampleCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return sample_service.create_sample(sample, db)
 
 
 @router.put("/{sample_id}", response_model=SampleOut)
-def update_sample(sample_id: int, sample: SampleUpdate, db: Session = Depends(get_db)):
-    return sample_service.update_sample(sample_id, sample, db)
+def update_sample(sample_id: int, sample: SampleUpdate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    return sample_service.update_sample(sample_id, sample, db, current_user["username"])
 
 
 @router.delete("/{sample_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_sample(sample_id: int, db: Session = Depends(get_db)):
+def delete_sample(sample_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     sample_service.delete_sample(sample_id, db)
     return
 
 @router.post("/{sample_id}/approve", response_model=SampleOut)
-def approve_sample_route(sample_id: int, db: Session = Depends(get_db)):
-    return sample_service.approve_sample(sample_id, db)
+def approve_sample_route(sample_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    return sample_service.approve_sample(sample_id, db, current_user["username"])
 
 @router.post("/{sample_id}/reject", response_model=SampleOut)
-def reject_sample_route(sample_id: int, db: Session = Depends(get_db)):
-    return sample_service.reject_sample(sample_id, db)
+def reject_sample_route(sample_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    return sample_service.reject_sample(sample_id, db, current_user["username"])

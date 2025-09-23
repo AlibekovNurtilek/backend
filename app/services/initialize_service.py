@@ -73,19 +73,26 @@ def cleanup_dataset_files(dataset: AudioDataset):
         logger.error(f"Ошибка при cleanup файлов датасета {dataset.id}: {e}")
 
 
-def create_dataset_entry(db: Session, url: str) -> int:
+async def create_dataset_entry(db: Session, url: str) -> int:
     """Создание записи датасета с транзакционной безопасностью"""
     try:
-        name = "test"
-        prefix = f"{name}_"
+        video_title = await get_youtube_title(url)
+        slug_video_title = slugify(video_title) if video_title else None
+
+        name = video_title if video_title else "new_dataset"
+        slug_name = slug_video_title if slug_video_title else "new_dataset"
+
+        prefix = f"{slug_name}_"
         existing_names = db.query(AudioDataset.name).filter(AudioDataset.name.like(f"{prefix}%")).all()
-        existing_indices = [int(name[0].replace(prefix, '')) for name in existing_names if name[0].replace(prefix, '').isdigit()]
+        existing_indices = [int(name[0].replace(prefix, '')) for slug_name in existing_names if name[0].replace(prefix, '').isdigit()]
         next_index = max(existing_indices, default=0) + 1
 
-        base_name = f"{name}_{next_index}"
+        base_name = f"{name} {next_index}" if next_index > 1 else name
+        slug_base_name = f"{slug_name}_{next_index}" if next_index > 1 else slug_name
+
         datasets_root = Path("datasets")
-        source_rel_path = datasets_root / f"{base_name}.wav"
-        segments_rel_dir = datasets_root / f"{base_name}_wavs"
+        source_rel_path = datasets_root / f"{slug_base_name}.wav"
+        segments_rel_dir = datasets_root / f"{slug_base_name}_wavs"
 
         new_dataset = AudioDataset(
             name=base_name,
@@ -305,3 +312,28 @@ def create_sample_entries(db: Session, dataset_id: int, segments_abs_dir: str):
         raise DatasetInitializationError(f"Ошибка создания записей сэмплов: {e}")
     except Exception as e:
         raise DatasetInitializationError(f"Неожиданная ошибка при создании сэмплов: {e}")
+    
+
+async def get_youtube_title(url: str) -> Optional[str]:
+    """Получение названия видео по URL с YouTube"""
+    ydl_opts = {
+        'quiet': True,
+        'skip_download': True,
+        'forceurl': True,
+        'noplaylist': True,
+        'extract_flat': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', None)
+            if title:
+                return title
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка получения названия видео: {e}")
+        return None

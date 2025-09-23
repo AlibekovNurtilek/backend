@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI
-from app.routes import audio_route, auth_route, dataset_route, sample_route, transcription_router, ws_router
+from app.routes import audio_route, auth_route, dataset_route, sample_route, transcription_router, ws_router, user_route
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.db import Base, engine
@@ -36,6 +36,7 @@ app.include_router(audio_route.router)
 app.include_router(dataset_route.router)
 app.include_router(sample_route.router)
 app.include_router(transcription_router.router)
+app.include_router(user_route.router)
 
 @app.get("/")
 def read_root():

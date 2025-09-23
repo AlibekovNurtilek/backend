@@ -34,6 +34,8 @@ from typing import List
 class DatasetListResponse(BaseModel):
     items: List[DatasetOut]
     total: int
+    page: int | None = None
+    limit: int | None = None
 
 class DatasetImageUpdate(BaseModel):
     dataset_img: str

@@ -44,8 +44,8 @@ def get_db():
 
 @router.get("/", response_model=DatasetListResponse)
 def get_all_datasets(
-    limit: int = Query(10, ge=1),
-    offset: int = Query(0, ge=0),
+    page: int = Query(1, ge=1),   # номер страницы (по умолчанию 1)
+    limit: int = Query(10, ge=1), # количество элементов на странице
     status: Optional[str] = None,
     name_search: Optional[str] = None,
     created_from: Optional[datetime] = None,
@@ -55,7 +55,7 @@ def get_all_datasets(
     return dataset_service.get_all_datasets(
         db=db,
         limit=limit,
-        offset=offset,
+        page=page,
         status=status,
         name_search=name_search,
         created_from=created_from,
@@ -78,19 +78,22 @@ def delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/initialize")
-def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get_db)):
+async def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get_db)):
     # Шаг 0: проверяем наличие такого же URL в базе
-    # existing_dataset = db.query(AudioDataset).filter(AudioDataset.url == data.url).first()
-    # if existing_dataset:
-    #     logger.info(f"Датасет с таким URL уже существует: ID={existing_dataset.id}, name={existing_dataset.name}")
-    #     return {
-    #         "message": "Видео уже загружено",
-    #         "dataset_id": existing_dataset.id,
-    #         "status": existing_dataset.status,
-    #     }
+    existing_dataset = db.query(AudioDataset).filter(AudioDataset.url == data.url).first()
+    if existing_dataset:
+        logger.info(f"Датасет с таким URL уже существует: ID={existing_dataset.id}, name={existing_dataset.name}")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Видео уже загружено",
+                "dataset_id": existing_dataset.id,
+                "status": existing_dataset.status
+            }
+        )
 
     # Шаг 1: создаём запись в БД со статусом INITIALIZING
-    dataset_id = create_dataset_entry(db, data.url)
+    dataset_id = await create_dataset_entry(db, data.url)
 
     # Шаг 2: запускаем фоновую задачу
     task = initialize_dataset_task.delay(dataset_id, data.dict())

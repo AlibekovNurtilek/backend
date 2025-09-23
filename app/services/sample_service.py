@@ -1,9 +1,10 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from fastapi import HTTPException
-from app.models.samples import SampleText
+from app.models.samples import SampleText, ActionType
 from app.schemas.sample import SampleCreate, SampleUpdate
 from app.models.data_status import SampleStatus
+from .action_service import create_action
 
 def get_all_samples(db: Session):
     return db.query(SampleText).all()
@@ -85,7 +86,7 @@ def create_sample(sample: SampleCreate, db: Session):
     return new_sample
 
 
-def update_sample(sample_id: int, sample: SampleUpdate, db: Session):
+def update_sample(sample_id: int, sample: SampleUpdate, db: Session, username: str = None):
     db_sample = db.query(SampleText).filter(SampleText.id == sample_id).first()
     if not db_sample:
         raise HTTPException(status_code=404, detail="Sample not found")
@@ -93,6 +94,13 @@ def update_sample(sample_id: int, sample: SampleUpdate, db: Session):
     db_sample.text = sample.text
     db.commit()
     db.refresh(db_sample)
+    if username:
+        create_action(
+            db=db,
+            sample_id=sample_id,
+            username=username,
+            action_type=ActionType.EDIT,
+        )
     return db_sample
 
 
@@ -104,20 +112,34 @@ def delete_sample(sample_id: int, db: Session):
     db.delete(db_sample)
     db.commit()
 
-def approve_sample(sample_id: int, db: Session):
+def approve_sample(sample_id: int, db: Session, username: str = None):
     sample = db.query(SampleText).filter(SampleText.id == sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found")
     sample.status = SampleStatus.APPROVED
     db.commit()
     db.refresh(sample)
+    if username:
+        create_action(
+            db=db,
+            sample_id=sample_id,
+            username=username,
+            action_type=ActionType.APPROVE
+        )
     return sample
 
-def reject_sample(sample_id: int, db: Session):
+def reject_sample(sample_id: int, db: Session, username: str = None):
     sample = db.query(SampleText).filter(SampleText.id == sample_id).first()
     if not sample:
         raise HTTPException(status_code=404, detail="Sample not found")
     sample.status = SampleStatus.REJECTED
     db.commit()
     db.refresh(sample)
+    if username:
+        create_action(
+            db=db,
+            sample_id=sample_id,
+            username=username,
+            action_type=ActionType.REJECT
+        )
     return sample

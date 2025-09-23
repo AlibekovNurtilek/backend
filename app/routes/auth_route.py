@@ -22,6 +22,8 @@ def get_db():
 
 @router.post("/register", response_model=schemas.UserOut)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db), admin = Depends(admin_required)):
+    if user.role == models.UserRole.ADMIN :
+        raise HTTPException(status_code=400, detail="You cannot create an admin.")
     existing_user = db.query(models.User).filter(models.User.username == user.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already taken")
