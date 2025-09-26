@@ -88,3 +88,21 @@ def logout():
     response.delete_cookie("access_token")
     return response
 
+
+def ensure_admin_exists():
+    db: Session = SessionLocal()
+    try:
+        user_count = db.query(models.User).count()
+        if user_count == 0:
+            hashed_pw = utils.hash_password("ashjeysinbidosum")  # можно менять пароль
+            admin_user = models.User(
+                username="admin",
+                hashed_password=hashed_pw,
+                role=models.UserRole.ADMIN
+            )
+            db.add(admin_user)
+            db.commit()
+        else:
+            print("ℹ Users already exist. No admin created.")
+    finally:
+        db.close()

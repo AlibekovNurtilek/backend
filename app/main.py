@@ -4,14 +4,16 @@ from app.routes import audio_route, auth_route, dataset_route, sample_route, tra
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.db import Base, engine
-from app.auth import models  # обязательно, чтобы модель подгрузилась
+from app.auth import models 
 from app.routes.ws_router import redis_listener
-
+from app.routes.auth_route import ensure_admin_exists
 # создаёт таблицы, если их нет
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="TTS Audio Validator2 ")
 app.include_router(ws_router.router)
+
+ensure_admin_exists()
 
 @app.on_event("startup")
 async def startup():
