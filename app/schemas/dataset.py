@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 class DatasetBase(BaseModel):
@@ -39,3 +39,16 @@ class DatasetListResponse(BaseModel):
 
 class DatasetImageUpdate(BaseModel):
     dataset_img: str
+
+
+class DatasetResegmentRequest(BaseModel):
+    min_duration: float = Field(..., gt=0, description="Минимальная длительность сегмента в секундах")
+    max_duration: float = Field(..., gt=0, description="Максимальная длительность сегмента в секундах")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "min_duration": 1.0,
+                "max_duration": 10.0
+            }
+        }

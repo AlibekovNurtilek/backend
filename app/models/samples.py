@@ -13,6 +13,7 @@ from app.db import Base
 from sqlalchemy import Enum as SqlEnum
 from app.models.data_status import SampleStatus
 from enum import Enum
+from app.auth.models import User
 
 class SampleText(Base):
     __tablename__ = "samples"

@@ -3,11 +3,10 @@ import numpy as np
 import librosa
 import soundfile as sf
 import logging
-import torch
 import shutil
-import threading
 from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
+from pathlib import Path
 from app.tasks.notify_tasks import notify_progress_task
 
 logger = logging.getLogger(__name__)
@@ -18,36 +17,344 @@ class SegmentationError(Exception):
     pass
 
 
-class SileroVADManager:
-    """Thread-safe singleton для управления Silero VAD моделью"""
-    _instance = None
-    _lock = threading.Lock()
-    _model = None
-    _utils = None
+class ImprovedAudioSegmenter:
+    """Новый алгоритм сегментации на основе энергетического анализа"""
+    
+    def __init__(self, 
+                 min_duration=5.0, 
+                 max_duration=25.0, 
+                 split_coefficient=2,
+                 initial_silence_threshold=0.005,
+                 max_silence_threshold=0.05,
+                 max_discard_ratio=0.1,
+                 min_silence_duration=0.1):
+        """
+        Args:
+            min_duration: Минимальная длительность сегмента (сек)
+            max_duration: Максимальная длительность сегмента (сек)
+            split_coefficient: Коэффициент k для первичного деления
+            initial_silence_threshold: Начальный порог тишины
+            max_silence_threshold: Минимальный порог тишины
+            max_discard_ratio: Максимальный процент аудио для выброса (0.1 = 10%)
+            min_silence_duration: Минимальная длительность тишины для деления (сек)
+        """
+        self.min_duration = min_duration
+        self.max_duration = max_duration
+        self.split_coefficient = split_coefficient
+        self.initial_silence_threshold = initial_silence_threshold
+        self.max_silence_threshold = max_silence_threshold
+        self.max_discard_ratio = max_discard_ratio
+        self.min_silence_duration = min_silence_duration
+        
+        # Мемоизация энергий окон
+        self.window_energies = None
+        self.window_positions = None
+        self.sr = None
+        self.window_size = None
+        self.hop_size = None
+        
+        # Статистика
+        self.total_segments = 0
+        self.discarded_segments = 0
+        self.total_duration = 0.0
+        self.discarded_duration = 0.0
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
+    def segment_audio(self, audio_path: str, output_dir: str, dataset_id: int = 1) -> Dict:
+        """Сегментирует wav-файл и сохраняет сегменты в output_dir"""
+        logger.info(f"Начинаем сегментацию: {audio_path}")
+        
+        try:
+            # Загрузка аудио
+            notify_progress_task.delay(dataset_id=dataset_id, task="Загрузка аудио", progress=10)
+            audio_np, sr = librosa.load(audio_path, sr=None)
+            self.sr = sr
+            self.total_duration = len(audio_np) / sr
+            
+            if len(audio_np) == 0:
+                raise SegmentationError("Аудио файл пуст")
+            
+            # Нормализация
+            if np.max(np.abs(audio_np)) > 0:
+                normalized_audio = audio_np / np.max(np.abs(audio_np))
+            else:
+                normalized_audio = audio_np
+                
+            notify_progress_task.delay(dataset_id=dataset_id, task="Анализ энергии", progress=25)
+            
+            # Мемоизация - один проход для вычисления всех энергий окон
+            self._compute_window_energies(normalized_audio)
+            
+            notify_progress_task.delay(dataset_id=dataset_id, task="Рекурсивное деление", progress=40)
+            
+            # Рекурсивная сегментация
+            segments = self._recursive_split(0, len(audio_np))
+            
+            notify_progress_task.delay(dataset_id=dataset_id, task="Фильтрация сегментов", progress=60)
+            
+            # Фильтруем по длительности
+            final_segments = self._filter_segments(segments)
+            
+            if not final_segments:
+                raise SegmentationError("Не удалось создать валидные сегменты")
+            
+            notify_progress_task.delay(dataset_id=dataset_id, task="Экспорт сегментов", progress=75)
+            
+            # Экспортируем
+            segment_info = self._export_segments(final_segments, audio_np, sr, output_dir, dataset_id)
+            
+            notify_progress_task.delay(dataset_id=dataset_id, task="Сегментация завершена", progress=100)
+            
+            # Подготовка статистики
+            durations = [seg['duration'] for seg in segment_info]
+            stats = {
+                "total_chunks": len(segment_info),
+                "saved": len(segment_info),
+                "avg_duration": float(np.mean(durations)) if durations else 0,
+                "min_duration": float(np.min(durations)) if durations else 0,
+                "max_duration": float(np.max(durations)) if durations else 0,
+                "total_segments": self.total_segments,
+                "discarded_segments": self.discarded_segments,
+                "total_input_duration": self.total_duration,
+                "discarded_duration": self.discarded_duration
+            }
+            
+            logger.info(f"Сегментация завершена: {len(segment_info)} сегментов")
+            
+            return {
+                "status": "success",
+                "segments_count": len(segment_info),
+                "stats": stats
+            }
+            
+        except Exception as e:
+            logger.exception(f"Ошибка сегментации: {e}")
+            # Очищаем выходную директорию при ошибке
+            try:
+                if os.path.exists(output_dir):
+                    shutil.rmtree(output_dir)
+                    logger.info(f"Очищена директория после ошибки: {output_dir}")
+            except Exception as cleanup_error:
+                logger.error(f"Ошибка очистки директории: {cleanup_error}")
+            
+            return {
+                "status": "error",
+                "message": str(e),
+                "segments_count": 0,
+                "stats": {"total_chunks": 0, "saved": 0}
+            }
 
-    def get_model(self):
-        if self._model is None:
-            with self._lock:
-                if self._model is None:
-                    try:
-                        model, utils = torch.hub.load(
-                            repo_or_dir='snakers4/silero-vad',
-                            model='silero_vad',
-                            force_reload=False
-                        )
-                        self._model = model
-                        self._utils = utils
-                        logger.info("Silero VAD модель загружена успешно")
-                    except Exception as e:
-                        raise SegmentationError(f"Ошибка загрузки Silero VAD: {e}")
-        return self._utils[0], self._model  # get_speech_timestamps, model
+    def _compute_window_energies(self, audio: np.ndarray):
+        """Вычисляет и сохраняет энергии всех окон для мемоизации"""
+        logger.info("Вычисляем энергии окон для мемоизации...")
+        
+        # Параметры анализа
+        self.window_size = max(int(0.04 * self.sr), 100)  # ~40мс окна
+        self.hop_size = self.window_size // 4
+        
+        self.window_energies = []
+        self.window_positions = []
+        
+        # RMS энергия для каждого окна
+        for i in range(0, len(audio) - self.window_size, self.hop_size):
+            window = audio[i:i + self.window_size]
+            energy = np.sqrt(np.mean(window ** 2))
+            
+            self.window_energies.append(energy)
+            self.window_positions.append(i + self.window_size // 2)
+        
+        logger.info(f"Вычислено {len(self.window_energies)} окон энергии")
+
+    def _recursive_split(self, start_sample: int, end_sample: int, 
+                        silence_threshold: Optional[float] = None) -> List[Tuple[int, int]]:
+        if silence_threshold is None:
+            silence_threshold = self.initial_silence_threshold
+            
+        segment_length = end_sample - start_sample
+        duration_sec = segment_length / self.sr        
+        if duration_sec <= self.max_duration:
+            return [(start_sample, end_sample)]
+        
+        silence_intervals = self._find_silence_intervals(start_sample, end_sample, silence_threshold)
+        
+        if not silence_intervals:
+            if silence_threshold <self.max_silence_threshold:
+                new_threshold = min(silence_threshold * 2, self.max_silence_threshold)
+                logger.info(f"Снижаем порог тишины: {silence_threshold:.4f} -> {new_threshold:.4f}")
+                return self._recursive_split(start_sample, end_sample, new_threshold)
+            else:
+                logger.debug(f"Выбрасываем сегмент {duration_sec:.2f}с - не найдена тишина")
+                self.discarded_segments += 1
+                self.discarded_duration += duration_sec
+                return []
+        
+        best_silence = self._select_best_silence(silence_intervals, start_sample, end_sample)
+        silence_start, silence_end = best_silence
+        
+        split_point = (silence_start + silence_end) // 2
+        
+        logger.debug(f"Делим в точке {split_point} (тишина {silence_start}-{silence_end})")
+        
+        left_segments = self._recursive_split(start_sample, split_point, silence_threshold)
+        right_segments = self._recursive_split(split_point, end_sample, silence_threshold)
+        
+        return left_segments + right_segments
+
+    def _find_silence_intervals(self, start_sample: int, end_sample: int, 
+                               silence_threshold: float) -> List[Tuple[int, int]]:
+        start_window_idx = None
+        end_window_idx = None
+        
+        for i, pos in enumerate(self.window_positions):
+            if start_window_idx is None and pos >= start_sample:
+                start_window_idx = i
+            if pos <= end_sample:
+                end_window_idx = i
+        
+        if start_window_idx is None or end_window_idx is None:
+            return []
+        
+        silence_windows = []
+        for i in range(start_window_idx, end_window_idx + 1):
+            if self.window_energies[i] < silence_threshold:
+                silence_windows.append(i)
+        
+        if not silence_windows:
+            return []
+        
+        silence_intervals = []
+        current_start = silence_windows[0]
+        current_end = silence_windows[0]
+        
+        for i in range(1, len(silence_windows)):
+            window_idx = silence_windows[i]
+            if window_idx == current_end + 1:
+                current_end = window_idx
+            else:
+                interval_start = self.window_positions[current_start] - self.window_size // 2
+                interval_end = self.window_positions[current_end] + self.window_size // 2
+                silence_intervals.append((interval_start, interval_end))
+                current_start = window_idx
+                current_end = window_idx
+        
+        interval_start = self.window_positions[current_start] - self.window_size // 2
+        interval_end = self.window_positions[current_end] + self.window_size // 2
+        silence_intervals.append((interval_start, interval_end))
+        
+        min_silence_samples = int(self.min_silence_duration * self.sr)
+        filtered_intervals = []
+        
+        for start, end in silence_intervals:
+            silence_length = end - start
+            if silence_length >= min_silence_samples:
+                filtered_intervals.append((start, end))
+            else:
+                logger.debug(f"Отброшена короткая тишина: {silence_length/self.sr:.3f}с < {self.min_silence_duration}с")
+        
+        return filtered_intervals
+
+    def _select_best_silence(self, silence_intervals: List[Tuple[int, int]], 
+                            start_sample: int, end_sample: int) -> Tuple[int, int]:
+        segment_center = (start_sample + end_sample) / 2
+        
+        best_silence = None
+        best_length = 0
+        best_distance_to_center = float('inf')
+        
+        for silence_start, silence_end in silence_intervals:
+            silence_length = silence_end - silence_start
+            silence_center = (silence_start + silence_end) / 2
+            distance_to_center = abs(silence_center - segment_center)
+            
+            is_better = (silence_length > best_length or 
+                        (silence_length == best_length and distance_to_center < best_distance_to_center))
+            
+            if is_better:
+                best_silence = (silence_start, silence_end)
+                best_length = silence_length
+                best_distance_to_center = distance_to_center
+        
+        return best_silence
+
+    def _filter_segments(self, segments: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if not segments:
+            return []
+            
+        filtered_segments = []
+        min_samples = int(self.min_duration * self.sr)
+        
+        for start, end in segments:
+            duration_samples = end - start
+            duration_sec = duration_samples / self.sr
+            
+            if duration_samples < min_samples:
+                logger.debug(f"Отбрасываем короткий сегмент: {duration_sec:.2f}с")
+                self.discarded_segments += 1
+                self.discarded_duration += duration_sec
+                continue
+            
+            filtered_segments.append((start, end))
+            self.total_segments += 1
+        
+        discarded_ratio = (self.discarded_duration / self.total_duration * 100 
+                           if self.total_duration > 0 else 0)
+        logger.info(f"Статистика: всего={self.total_segments}, "
+                    f"отброшено={self.discarded_segments}, "
+                    f"выброшено={discarded_ratio:.2f}% от общей длительности")
+        
+        return filtered_segments
+
+    def _export_segments(self, segments: List[Tuple[int, int]], audio_np: np.ndarray, 
+                        sr: int, output_dir: str, dataset_id: int) -> List[Dict]:
+        segments_dir = Path(output_dir)
+        if segments_dir.exists():
+            shutil.rmtree(segments_dir)
+        segments_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_info = []
+        total_segments = len(segments)
+        
+        for i, (start_sample, end_sample) in enumerate(segments, 1):
+            chunk_np = audio_np[start_sample:end_sample]
+            duration_sec = len(chunk_np) / sr
+            start_time_sec = start_sample / sr
+            end_time_sec = end_sample / sr
+
+            filename = f"segment_{i:04d}.wav"
+            filepath = segments_dir / filename
+            
+            try:
+                sf.write(str(filepath), chunk_np, sr, subtype='PCM_16')
+                
+                # Проверяем что файл действительно создался и не пуст
+                if not filepath.exists() or filepath.stat().st_size == 0:
+                    raise SegmentationError(f"Файл не был создан или пуст: {filepath}")
+                    
+            except Exception as e:
+                raise SegmentationError(f"Ошибка записи файла {filepath}: {e}")
+
+            segment_info.append({
+                'path': str(filepath),
+                'filename': filename,
+                'start': start_time_sec,
+                'end': end_time_sec,
+                'duration': duration_sec,
+                'index': i,
+                'start_sample': start_sample,
+                'end_sample': end_sample
+            })
+            
+            # Уведомление о прогрессе экспорта
+            if i % max(1, total_segments // 10) == 0:
+                progress = 75 + int((i / total_segments) * 20)
+                notify_progress_task.delay(dataset_id=dataset_id, task="Экспорт сегментов", progress=progress)
+
+        logger.info(f"Сегментация завершена. Экспортировано {len(segment_info)} сегментов.")
+        
+        durations = [seg['duration'] for seg in segment_info]
+        if durations:
+            logger.info(f"Длительности: мин={min(durations):.2f}с, макс={max(durations):.2f}с, средн={np.mean(durations):.2f}с")
+        
+        return segment_info
 
 
 @contextmanager
@@ -69,20 +376,18 @@ def safe_file_operations(output_dir: str, cleanup_on_error: bool = True):
         raise e
 
 
-def validate_audio_parameters(min_length: float, max_length: float, min_silence_duration: float) -> None:
+def validate_audio_parameters(min_length: float, max_length: float) -> None:
     """Валидация параметров сегментации"""
     if min_length <= 0:
         raise SegmentationError("min_length должен быть положительным")
     if max_length <= min_length:
         raise SegmentationError("max_length должен быть больше min_length")
-    if min_silence_duration < 0:
-        raise SegmentationError("min_silence_duration не может быть отрицательным")
     if min_length > 60 or max_length > 300:
         raise SegmentationError("Слишком большие значения длительности сегментов")
 
 
-def load_and_validate_audio(input_wav_path: str, target_sr: int = 16000) -> Tuple[np.ndarray, int, float]:
-    """Безопасная загрузка и валидация аудио файла"""
+def load_and_validate_audio(input_wav_path: str) -> Tuple[float]:
+    """Быстрая валидация аудио файла"""
     if not os.path.exists(input_wav_path):
         raise SegmentationError(f"Входной файл не найден: {input_wav_path}")
     
@@ -92,285 +397,65 @@ def load_and_validate_audio(input_wav_path: str, target_sr: int = 16000) -> Tupl
         if file_size == 0:
             raise SegmentationError("Входной файл пуст")
         
-        # Загружаем аудио
-        y, sr = librosa.load(input_wav_path, sr=target_sr, mono=True)
+        # Быстрая проверка длительности без полной загрузки
+        duration = librosa.get_duration(filename=input_wav_path)
         
-        if len(y) == 0:
-            raise SegmentationError("Аудио файл не содержит данных")
-        
-        if sr != target_sr:
-            raise SegmentationError(f"Не удалось привести к частоте {target_sr}Hz")
-        
-        total_duration = len(y) / sr
-        if total_duration < 1.0:
+        if duration < 1.0:
             raise SegmentationError("Слишком короткое аудио (менее 1 секунды)")
             
-        if total_duration > 3600:  # 1 час
-            raise SegmentationError("Слишком длинное аудио (более 1 часа)")
+        if duration > 36000:  # 10 часов
+            raise SegmentationError("Слишком длинное аудио (более 10 часов)")
         
-        logger.info(f"Аудио загружено: {total_duration:.2f}s, {sr}Hz, {len(y)} сэмплов")
-        return y, sr, total_duration
+        logger.info(f"Аудио валидация пройдена: {duration:.2f}с")
+        return duration
         
     except librosa.LibrosaError as e:
-        raise SegmentationError(f"Ошибка загрузки аудио с librosa: {e}")
+        raise SegmentationError(f"Ошибка валидации аудио с librosa: {e}")
     except Exception as e:
-        raise SegmentationError(f"Неожиданная ошибка загрузки аудио: {e}")
-
-
-def perform_vad_analysis(audio_data: np.ndarray, min_silence_duration: float, speech_pad: float) -> List[Dict]:
-    """Выполнение VAD анализа с обработкой ошибок"""
-    try:
-        vad_manager = SileroVADManager()
-        get_speech_timestamps, model = vad_manager.get_model()
-        
-        # Подготавливаем тензор
-        wav_tensor = torch.from_numpy(audio_data).float()
-        if wav_tensor.dim() == 1:
-            wav_tensor = wav_tensor.unsqueeze(0)
-        
-        # Выполняем VAD
-        speech_segments = get_speech_timestamps(
-            wav_tensor,
-            model,
-            threshold=0.5,
-            min_silence_duration_ms=int(min_silence_duration * 1000),
-            speech_pad_ms=int(speech_pad * 1000)
-        )
-        
-        # Конвертируем в удобный формат
-        active_intervals = [
-            {"start": s["start"] / 16000.0, "end": s["end"] / 16000.0}
-            for s in speech_segments
-        ]
-        
-        logger.info(f"VAD обнаружил {len(active_intervals)} речевых сегментов")
-        return active_intervals
-        
-    except Exception as e:
-        raise SegmentationError(f"Ошибка VAD анализа: {e}")
-
-
-def merge_speech_intervals(intervals: List[Dict], min_silence_duration: float) -> List[Dict]:
-    """Слияние близких речевых интервалов"""
-    if not intervals:
-        return []
-    
-    merged = []
-    current = intervals[0].copy()
-    
-    for next_seg in intervals[1:]:
-        if next_seg["start"] - current["end"] < min_silence_duration:
-            current["end"] = next_seg["end"]
-        else:
-            merged.append(current)
-            current = next_seg.copy()
-    
-    merged.append(current)
-    logger.info(f"После слияния: {len(merged)} интервалов")
-    return merged
-
-
-def create_audio_segments(
-    audio_data: np.ndarray,
-    sr: int,
-    merged_intervals: List[Dict],
-    output_dir: str,
-    min_length: float,
-    max_length: float,
-    max_extension: float,
-    allow_short_final: bool,
-    min_silence_duration: float,
-    dataset_id: int
-) -> Dict:
-    """Создание аудио сегментов с обработкой ошибок"""
-    
-    if not os.path.exists(output_dir):
-        raise SegmentationError(f"Выходная директория не существует: {output_dir}")
-    
-    total_duration = len(audio_data) / sr
-    chunks = []
-    durations = []
-    current_time = 0.0
-    split_points = []
-    estimated_segments = max(1, int(total_duration / max_length))
-    
-    with safe_file_operations(output_dir) as created_files:
-        segment_count = 0
-        
-        while current_time < total_duration:
-            try:
-                start_time = current_time
-                min_end_time = start_time + min_length
-                max_end_time = start_time + max_length
-                hard_end_time = min(max_end_time, total_duration)
-                search_end_time = min(max_end_time + max_extension, total_duration)
-
-                # Поиск точки разреза
-                cut_time = None
-                for interval in merged_intervals:
-                    if interval["start"] > min_end_time and interval["start"] <= search_end_time:
-                        prev_end = current_time
-                        for prev in merged_intervals:
-                            if prev["end"] < interval["start"]:
-                                prev_end = max(prev_end, prev["end"])
-                        if interval["start"] - prev_end >= min_silence_duration:
-                            cut_time = interval["start"]
-                            break
-
-                if cut_time is None:
-                    cut_time = hard_end_time
-
-                seg_duration = cut_time - start_time
-                
-                # Обработка коротких сегментов
-                if seg_duration < min_length:
-                    if cut_time >= total_duration and allow_short_final:
-                        cut_time = total_duration
-                    else:
-                        cut_time = min(start_time + max_length, total_duration)
-                        if cut_time - start_time < min_length:
-                            if allow_short_final and start_time < total_duration:
-                                cut_time = total_duration
-                            else:
-                                break
-
-                # Проверка минимальной длительности
-                if cut_time <= start_time + 1e-3:
-                    cut_time = min(start_time + 0.2, total_duration)
-                    if cut_time <= start_time:
-                        break
-
-                # Извлечение сегмента
-                start_sample = int(start_time * sr)
-                end_sample = int(cut_time * sr)
-                
-                if start_sample >= end_sample or end_sample > len(audio_data):
-                    logger.warning(f"Некорректные границы сегмента: {start_sample}-{end_sample}")
-                    break
-                    
-                segment = audio_data[start_sample:end_sample]
-
-                if len(segment) == 0:
-                    logger.warning("Пустой сегмент, прерываем")
-                    break
-
-                # Сохранение сегмента
-                filename = f"segment_{segment_count + 1:04d}.wav"
-                filepath = os.path.join(output_dir, filename)
-                
-                try:
-                    sf.write(filepath, segment, sr, subtype='PCM_16')
-                    created_files.append(filepath)
-                    
-                    # Проверяем что файл действительно создался и не пуст
-                    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-                        raise SegmentationError(f"Файл не был создан или пуст: {filepath}")
-                        
-                except Exception as e:
-                    raise SegmentationError(f"Ошибка записи файла {filepath}: {e}")
-
-                chunks.append({"start": start_time, "end": cut_time, "samples": segment})
-                durations.append(cut_time - start_time)
-                split_points.append(cut_time)
-                segment_count += 1
-
-                # Уведомление о прогрессе
-                progress = 60 + int((segment_count / estimated_segments) * 30)
-                progress = min(progress, 90)
-                notify_progress_task.delay(dataset_id=dataset_id, task="Формирование сегментов", progress=progress)
-
-                current_time = cut_time
-                if current_time >= total_duration - 1e-3:
-                    break
-                    
-            except Exception as e:
-                logger.error(f"Ошибка создания сегмента {segment_count + 1}: {e}")
-                raise SegmentationError(f"Ошибка создания сегмента: {e}")
-
-        if segment_count == 0:
-            raise SegmentationError("Не удалось создать ни одного сегмента")
-
-    return {
-        "chunks": chunks,
-        "durations": durations,
-        "split_points": split_points,
-        "segments_count": segment_count
-    }
+        raise SegmentationError(f"Неожиданная ошибка валидации аудио: {e}")
 
 
 def segment_audio(
     input_wav_path: str,
     output_dir: str,
-    min_length: float = 1.5,
-    max_length: float = 12.0,
-    min_silence_duration: float = 0.3,
-    speech_pad: float = 0.05,
-    frame_length: int = 512,
-    hop_length: int = 160,
-    max_extension: float = 1.5,
-    allow_short_final: bool = True,
-    debug: bool = False,
+    min_length: float = 5,
+    max_length: float = 25,
+    min_silence_duration: float = 0.1,
     dataset_id: int = 1
 ) -> Dict:
-    """Главная функция сегментации с полной обработкой ошибок"""
+    """Главная функция сегментации с новым алгоритмом"""
     
     try:
         # Валидация параметров
-        validate_audio_parameters(min_length, max_length, min_silence_duration)
+        validate_audio_parameters(min_length, max_length)
         
         # Создаем выходную директорию
         os.makedirs(output_dir, exist_ok=True)
         
-        # Шаг 1: Загрузка WAV
-        notify_progress_task.delay(dataset_id=dataset_id, task="Загрузка WAV", progress=0)
-        y, sr, total_duration = load_and_validate_audio(input_wav_path)
-        notify_progress_task.delay(dataset_id=dataset_id, task="Загрузка WAV", progress=10)
-
-        # Шаг 2: VAD анализ
-        notify_progress_task.delay(dataset_id=dataset_id, task="VAD анализ", progress=15)
-        active_intervals = perform_vad_analysis(y, min_silence_duration, speech_pad)
-        notify_progress_task.delay(dataset_id=dataset_id, task="VAD анализ", progress=30)
-
-        if not active_intervals:
-            return {
-                "status": "warning", 
-                "message": "Речь не обнаружена", 
-                "segments_count": 0,
-                "stats": {"total_chunks": 0, "saved": 0}
-            }
-
-        # Шаг 3: Слияние интервалов
-        notify_progress_task.delay(dataset_id=dataset_id, task="Сегментация речи", progress=40)
-        merged = merge_speech_intervals(active_intervals, min_silence_duration)
-        notify_progress_task.delay(dataset_id=dataset_id, task="Сегментация речи", progress=50)
-
-        # Шаг 4: Создание сегментов
-        result = create_audio_segments(
-            y, sr, merged, output_dir, min_length, max_length, 
-            max_extension, allow_short_final, min_silence_duration, dataset_id
+        # Быстрая валидация файла
+        notify_progress_task.delay(dataset_id=dataset_id, task="Валидация аудио", progress=5)
+        total_duration = load_and_validate_audio(input_wav_path)
+        
+        # Создаем сегментатор с новыми параметрами
+        segmenter = ImprovedAudioSegmenter(
+            min_duration=min_length,
+            max_duration=max_length,
+            split_coefficient=2,
+            initial_silence_threshold=0.005,
+            max_silence_threshold=0.05,
+            max_discard_ratio=0.1,
+            min_silence_duration=min_silence_duration
         )
         
-        # Шаг 5: Финализация
-        notify_progress_task.delay(dataset_id=dataset_id, task="Запись файлов", progress=100)
-
-        stats = {
-            "total_chunks": len(result["chunks"]),
-            "saved": result["segments_count"],
-            "avg_duration": float(np.mean(result["durations"])) if result["durations"] else 0,
-            "min_duration": float(np.min(result["durations"])) if result["durations"] else 0,
-            "max_duration": float(np.max(result["durations"])) if result["durations"] else 0,
-            "allow_short_final": allow_short_final,
-            "total_input_duration": total_duration
-        }
-
+        # Выполняем сегментацию
+        result = segmenter.segment_audio(input_wav_path, output_dir, dataset_id)
+        
+        if result['status'] == 'error':
+            return result
+        
         logger.info(f"Сегментация завершена: {result['segments_count']} сегментов")
         
-        return {
-            "status": "success",
-            "segments_count": result["segments_count"],
-            "stats": stats,
-            "split_points": result["split_points"]
-        }
+        return result
 
     except SegmentationError as e:
         logger.error(f"Ошибка сегментации: {e}")

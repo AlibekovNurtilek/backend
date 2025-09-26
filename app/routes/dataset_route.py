@@ -8,7 +8,7 @@ from app.db import SessionLocal
 from pydantic import BaseModel
 from app.models.datasets import AudioDataset
 from app.services import dataset_service
-from app.schemas.dataset import DatasetListResponse
+from app.schemas.dataset import DatasetListResponse, DatasetResegmentRequest
 from app.schemas.dataset import (
     DatasetCreate,
     DatasetUpdate,
@@ -16,7 +16,7 @@ from app.schemas.dataset import (
     DatasetInitRequest,
     DatasetImageUpdate
 )
-from app.tasks.initialize_dataset_tasks import initialize_dataset_task
+from app.tasks.initialize_dataset_tasks import initialize_dataset_task, resegment_dataset_task
 from app.services.initialize_service import create_dataset_entry
 import logging
 logger = logging.getLogger(__name__)
@@ -104,3 +104,68 @@ async def initialize_dataset(data: DatasetInitRequest, db: Session = Depends(get
         "dataset_id": dataset_id
     }
 
+
+
+@router.post("/{dataset_id}/resegment")
+async def resegment_dataset_route(
+    dataset_id: int, 
+    data: DatasetResegmentRequest, 
+    db: Session = Depends(get_db)
+):
+    """
+    Ресегментация существующего датасета с новыми параметрами
+    
+    - **dataset_id**: ID датасета для ресегментации
+    - **min_duration**: Минимальная длительность сегмента в секундах
+    - **max_duration**: Максимальная длительность сегмента в секундах
+    """
+    
+    # Проверяем существование датасета
+    existing_dataset = db.query(AudioDataset).filter(AudioDataset.id == dataset_id).first()
+    if not existing_dataset:
+        logger.warning(f"Попытка ресегментации несуществующего датасета: ID={dataset_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Датасет с ID {dataset_id} не найден"
+        )
+    
+    # Проверяем что датасет готов к ресегментации
+    from app.models.datasets import DatasetStatus
+    if existing_dataset.status not in [DatasetStatus.SAMPLED, DatasetStatus.ERROR]:
+        logger.warning(f"Попытка ресегментации датасета в неподходящем статусе: ID={dataset_id}, status={existing_dataset.status}")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": f"Датасет в статусе '{existing_dataset.status}' не может быть ресегментирован",
+                "current_status": existing_dataset.status,
+                "allowed_statuses": ["SAMPLED", "ERROR"]
+            }
+        )
+    
+    # Проверяем корректность параметров
+    if data.min_duration >= data.max_duration:
+        raise HTTPException(
+            status_code=400,
+            detail="Минимальная длительность должна быть меньше максимальной"
+        )
+    
+    # Логируем начало процесса
+    logger.info(f"Запуск ресегментации датасета: ID={dataset_id}, min={data.min_duration}s, max={data.max_duration}s")
+    
+    # Запускаем фоновую задачу ресегментации
+    task = resegment_dataset_task.delay(
+        dataset_id=dataset_id,
+        min_duration=data.min_duration,
+        max_duration=data.max_duration
+    )
+    
+    return {
+        "message": "Задача ресегментации добавлена в очередь",
+        "task_id": task.id,
+        "dataset_id": dataset_id,
+        "dataset_name": existing_dataset.name,
+        "parameters": {
+            "min_duration": data.min_duration,
+            "max_duration": data.max_duration
+        }
+    }
